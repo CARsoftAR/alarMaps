@@ -1,7 +1,6 @@
-import 'dart:convert';
 import 'package:flutter/foundation.dart';
-import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
+import 'package:geocoding/geocoding.dart';
 
 class SearchResult {
   final String displayShortName;
@@ -18,101 +17,86 @@ class SearchResult {
 }
 
 class SearchService {
-  static const String _userAgent = 'AlarMap/1.0 (Flutter App; Argentina)';
-  static const String _googleApiKey = 'AIzaSyBrKYzDilrpRuzduz2762JsbZpA03BMgE8';
-  static const String _geocodeUrl = 'https://maps.googleapis.com/maps/api/geocode/json';
-
   static void _log(String message) {
-    if (kDebugMode) debugPrint('[SEARCH] $message');
+    if (kDebugMode) debugPrint('[SEARCH-GEO] $message');
   }
 
-  /// Búsqueda manual y estricta usando Google Geocoding API
+  /// Búsqueda manual usando la librería 'geocoding' (como en mi_pedido)
+  /// Esto usa el geocodificador nativo del dispositivo, mucho más preciso para calles locales.
   static Future<SearchResult?> performHardSearch(String query) async {
     if (query.trim().isEmpty) return null;
 
-    final uri = Uri.parse(_geocodeUrl).replace(
-      queryParameters: {
-        'address': query,
-        'key': _googleApiKey,
-        'components': 'country:AR',
-        'language': 'es',
-      },
-    );
-
-    _log('Ejecutando Hard Search: $uri');
+    _log('Ejecutando búsqueda nativa para: "$query"');
 
     try {
-      final response = await http.get(uri, headers: {'User-Agent': _userAgent});
+      // 1. Obtener coordenadas desde la dirección
+      // Intentamos forzar la búsqueda en Argentina agregando el contexto si no lo tiene
+      String searchAddress = query;
+      if (!query.toLowerCase().contains('argentina')) {
+        searchAddress = '$query, Berazategui, Argentina';
+      }
 
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
+      List<Location> locations = await locationFromAddress(searchAddress);
 
-        if (data['status'] != 'OK') {
-          _log('Google API Status: ${data['status']}');
-          return null;
-        }
+      if (locations.isEmpty) {
+        _log('No se encontraron ubicaciones para: $searchAddress');
+        return null;
+      }
 
-        final results = data['results'] as List<dynamic>;
-        if (results.isEmpty) return null;
+      // Tomamos la primera ubicación encontrada
+      final loc = locations.first;
+      final latLng = LatLng(loc.latitude, loc.longitude);
 
-        // Procesar el primer resultado (más relevante)
-        final first = results.first as Map<String, dynamic>;
-        final formattedAddress = first['formatted_address'] as String? ?? '';
-        final geometry = first['geometry'] as Map<String, dynamic>?;
-        final locationMap = geometry?['location'] as Map<String, dynamic>?;
+      // 2. Reverse Geocoding para obtener el nombre formateado y validar
+      List<Placemark> placemarks = await placemarkFromCoordinates(loc.latitude, loc.longitude);
+      
+      String shortName = query;
+      String fullName = query;
 
-        final lat = locationMap?['lat'] as double? ?? 0.0;
-        final lng = locationMap?['lng'] as double? ?? 0.0;
-
-        // VALIDACIÓN DE NÚMERO DE CALLE
-        // Extraemos los números de la consulta del usuario
-        final inputNumbers = RegExp(r'\d+').allMatches(query).map((m) => m.group(0)!).toList();
+      if (placemarks.isNotEmpty) {
+        final p = placemarks.first;
+        shortName = '${p.street}';
+        fullName = '${p.street}, ${p.locality}, ${p.administrativeArea}';
         
-        if (inputNumbers.isNotEmpty) {
-          bool foundAllNumbers = inputNumbers.every((num) {
-            final regex = RegExp('\\b$num\\b');
-            return regex.hasMatch(formattedAddress);
-          });
+        _log('Resultado encontrado: $fullName');
 
-          if (!foundAllNumbers) {
-            _log('Error de validación: El número buscado no coincide con el devuelto por Google ($formattedAddress)');
-            return null; // Forzamos error si el número no coincide exactamente
+        // VALIDACIÓN DE NÚMERO (Opcional pero recomendada)
+        final inputNumbers = RegExp(r'\d+').allMatches(query).map((m) => m.group(0)!).toList();
+        if (inputNumbers.isNotEmpty) {
+          bool foundNumber = inputNumbers.any((n) => fullName.contains(n) || shortName.contains(n));
+          if (!foundNumber) {
+             _log('Aviso: El número buscado ($inputNumbers) no parece coincidir exactamente con el resultado nativo.');
+             // En modo nativo, a veces el street no tiene el número exacto, así que no bloqueamos, 
+             // pero lo informamos en el log.
           }
         }
-
-        return SearchResult(
-          displayShortName: formattedAddress.split(',').first,
-          displayFullName: formattedAddress,
-          location: LatLng(lat, lng),
-          isExactMatch: true,
-        );
       }
+
+      return SearchResult(
+        displayShortName: shortName,
+        displayFullName: fullName,
+        location: latLng,
+        isExactMatch: true,
+      );
     } catch (e) {
-      _log('Excepción en Hard Search: $e');
+      _log('Error en búsqueda nativa: $e');
+      
+      // Fallback: Si falla el geocodificador nativo (a veces pasa sin internet), 
+      // podríamos usar un servicio HTTP, pero por ahora reportamos el error.
+      return null;
     }
-    return null;
   }
 
-  /// Método para búsqueda reversa (usado al tocar el mapa)
+  /// Búsqueda reversa nativa
   static Future<String> reverseSearch(LatLng location) async {
-    final uri = Uri.parse(_geocodeUrl).replace(
-      queryParameters: {
-        'latlng': '${location.latitude},${location.longitude}',
-        'key': _googleApiKey,
-        'language': 'es',
-      },
-    );
-
     try {
-      final response = await http.get(uri, headers: {'User-Agent': _userAgent});
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        if (data['status'] == 'OK') {
-          final results = data['results'] as List<dynamic>;
-          if (results.isNotEmpty) {
-            return results.first['formatted_address'] ?? 'Ubicación seleccionada';
-          }
-        }
+      List<Placemark> placemarks = await placemarkFromCoordinates(
+        location.latitude,
+        location.longitude,
+      );
+      if (placemarks.isNotEmpty) {
+        final p = placemarks.first;
+        return '${p.street}, ${p.locality}';
       }
     } catch (e) {
       _log('Error en Reverse Search: $e');

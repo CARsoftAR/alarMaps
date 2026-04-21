@@ -28,7 +28,9 @@ class MapScreen extends ConsumerStatefulWidget {
 class _MapScreenState extends ConsumerState<MapScreen>
     with SingleTickerProviderStateMixin {
   final MapController _mapController = MapController();
+  final TextEditingController _originController = TextEditingController(text: 'Mi ubicación');
   final TextEditingController _destinationController = TextEditingController();
+  final FocusNode _originFocusNode = FocusNode();
   final FocusNode _destinationFocusNode = FocusNode();
 
   StreamSubscription? _serviceSubscription;
@@ -107,8 +109,14 @@ class _MapScreenState extends ConsumerState<MapScreen>
     _mapController.move(latLng, 15.0);
   }
 
-  Future<void> _performHardSearch(String query) async {
+  Future<void> _performHardSearch(String query, bool isOrigin) async {
     if (query.trim().isEmpty) return;
+    
+    if (isOrigin && (query == 'Mi ubicación' || query.toLowerCase() == 'mi ubicacion')) {
+      _centerOnUser();
+      ref.read(originLocationProvider.notifier).state = null; // Volver a GPS real
+      return;
+    }
 
     ref.read(isSearchingProvider.notifier).state = true;
     FocusScope.of(context).unfocus();
@@ -117,14 +125,20 @@ class _MapScreenState extends ConsumerState<MapScreen>
       final result = await SearchService.performHardSearch(query);
 
       if (result != null) {
-        ref.read(selectedDestinationProvider.notifier).state = result.location;
-        _destinationController.text = result.displayFullName;
-        _mapController.move(result.location, 18.0);
+        if (isOrigin) {
+          ref.read(originLocationProvider.notifier).state = result.location;
+          _originController.text = result.displayShortName;
+          _mapController.move(result.location, 16.0);
+        } else {
+          ref.read(selectedDestinationProvider.notifier).state = result.location;
+          _destinationController.text = result.displayFullName;
+          _mapController.move(result.location, 17.0);
+        }
       } else {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('Dirección no encontrada o número incorrecto'),
+              content: Text('Dirección no encontrada, verificá el número'),
               backgroundColor: Colors.redAccent,
               behavior: SnackBarBehavior.floating,
             ),
@@ -161,7 +175,10 @@ class _MapScreenState extends ConsumerState<MapScreen>
     _serviceSubscription?.cancel();
     _locationSubscription?.cancel();
     _pulseController.dispose();
+    _originFocusNode.dispose();
     _destinationFocusNode.dispose();
+    _originController.dispose();
+    _destinationController.dispose();
     super.dispose();
   }
 
@@ -224,26 +241,28 @@ class _MapScreenState extends ConsumerState<MapScreen>
                   ],
                 ),
               ],
-              if (userPos != null)
+              if (userPos != null || ref.watch(originLocationProvider) != null)
                 MarkerLayer(
                   markers: [
+                    // Marcador de Origen (Manual o GPS)
                     Marker(
-                      point: userPos,
-                      width: 20,
-                      height: 20,
+                      point: ref.watch(originLocationProvider) ?? userPos!,
+                      width: 30,
+                      height: 30,
                       child: Container(
                         decoration: BoxDecoration(
-                          color: Colors.blue,
+                          color: ref.watch(originLocationProvider) != null ? Colors.green : Colors.blue,
                           shape: BoxShape.circle,
-                          border: Border.all(color: Colors.white, width: 2),
+                          border: Border.all(color: Colors.white, width: 2.5),
                           boxShadow: [
                             BoxShadow(
-                              color: Colors.blue.withOpacity(0.5),
-                              blurRadius: 10,
-                              spreadRadius: 5,
+                              color: (ref.watch(originLocationProvider) != null ? Colors.green : Colors.blue).withOpacity(0.4),
+                              blurRadius: 8,
+                              spreadRadius: 2,
                             ),
                           ],
                         ),
+                        child: const Icon(Icons.person, color: Colors.white, size: 18),
                       ),
                     ),
                   ],
@@ -253,46 +272,71 @@ class _MapScreenState extends ConsumerState<MapScreen>
 
           // --- UI CLEAN: SIN BOTÓN TEST Y SIN TEXTO DEBUG ---
 
-          // Manual Search Bar
+          // Dual Search Bar (Origin & Destiny)
           Positioned(
             top: MediaQuery.of(context).padding.top + 10,
             left: 16,
             right: 16,
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               decoration: BoxDecoration(
                 color: Colors.white,
-                borderRadius: BorderRadius.circular(30),
+                borderRadius: BorderRadius.circular(25),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.black.withOpacity(0.1),
+                    color: Colors.black.withOpacity(0.12),
                     blurRadius: 20,
-                    offset: const Offset(0, 10),
+                    offset: const Offset(0, 8),
                   ),
                 ],
               ),
-              child: TextField(
-                controller: _destinationController,
-                focusNode: _destinationFocusNode,
-                onSubmitted: (val) => _performHardSearch(val),
-                decoration: InputDecoration(
-                  hintText: "¿A dónde vas?",
-                  border: InputBorder.none,
-                  prefixIcon: isSearching 
-                    ? const SizedBox(
-                        width: 20, 
-                        height: 20, 
-                        child: Padding(
-                          padding: EdgeInsets.all(12),
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      )
-                    : const Icon(Icons.location_on, color: Colors.red),
-                  suffixIcon: IconButton(
-                    icon: const Icon(Icons.search, color: Colors.blue),
-                    onPressed: () => _performHardSearch(_destinationController.text),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Campo de Origen
+                  TextField(
+                    controller: _originController,
+                    focusNode: _originFocusNode,
+                    onSubmitted: (val) => _performHardSearch(val, true),
+                    style: const TextStyle(fontSize: 14),
+                    decoration: InputDecoration(
+                      hintText: "Punto de partida",
+                      border: InputBorder.none,
+                      isDense: true,
+                      prefixIcon: const Icon(Icons.radio_button_checked, color: Colors.blue, size: 20),
+                      suffixIcon: IconButton(
+                        icon: const Icon(Icons.search, color: Colors.blue, size: 20),
+                        onPressed: () => _performHardSearch(_originController.text, true),
+                      ),
+                    ),
                   ),
-                ),
+                  const Divider(height: 1, color: Colors.black12),
+                  // Campo de Destino
+                  TextField(
+                    controller: _destinationController,
+                    focusNode: _destinationFocusNode,
+                    onSubmitted: (val) => _performHardSearch(val, false),
+                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                    decoration: InputDecoration(
+                      hintText: "¿A dónde vas?",
+                      border: InputBorder.none,
+                      isDense: true,
+                      prefixIcon: isSearching 
+                        ? const SizedBox(
+                            width: 20, height: 20,
+                            child: Padding(
+                              padding: EdgeInsets.all(12),
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          )
+                        : const Icon(Icons.location_on, color: Colors.red, size: 20),
+                      suffixIcon: IconButton(
+                        icon: const Icon(Icons.search, color: Colors.blue, size: 22),
+                        onPressed: () => _performHardSearch(_destinationController.text, false),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
@@ -318,8 +362,21 @@ class _MapScreenState extends ConsumerState<MapScreen>
   Widget _buildBottomPanel(BuildContext context, WidgetRef ref) {
     final destination = ref.watch(selectedDestinationProvider);
     final radius = ref.watch(selectedRadiusProvider);
-    final distance = ref.watch(currentDistanceProvider);
     final isActive = ref.watch(isAlarmActiveProvider);
+    final originPos = ref.watch(originLocationProvider);
+    final userPos = ref.watch(userLocationProvider);
+    
+    // Calcular distancia en tiempo real para la UI entre los dos pines
+    double? displayDistance;
+    if (destination != null) {
+      final startPoint = originPos ?? userPos;
+      if (startPoint != null) {
+        displayDistance = Geolocator.distanceBetween(
+          startPoint.latitude, startPoint.longitude,
+          destination.latitude, destination.longitude
+        );
+      }
+    }
 
     return DraggableScrollableSheet(
       initialChildSize: 0.15,
@@ -349,41 +406,47 @@ class _MapScreenState extends ConsumerState<MapScreen>
                   const SizedBox(height: 20),
 
                   if (destination != null) ...[
-                    if (isActive && distance != null) ...[
-                      const Text("Distancia al destino"),
+                    if (displayDistance != null) ...[
+                      const Text(
+                        "Distancia entre puntos",
+                        style: TextStyle(color: Colors.grey, fontSize: 12),
+                      ),
                       Text(
-                        "${(distance / 1000).toStringAsFixed(1)} KM",
+                        displayDistance > 1000 
+                          ? "${(displayDistance / 1000).toStringAsFixed(1)} KM"
+                          : "${displayDistance.toStringAsFixed(0)} metros",
                         style: const TextStyle(
                           fontSize: 32,
                           fontWeight: FontWeight.w900,
                           color: Colors.blue,
                         ),
                       ),
-                    ] else ...[
-                      const Text(
-                        "Radio de aviso",
-                        style: TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      Slider(
-                        value: radius,
-                        min: 200,
-                        max: 2000,
-                        onChanged: isActive
-                            ? null
-                            : (val) =>
-                                  ref
-                                          .read(selectedRadiusProvider.notifier)
-                                          .state =
-                                      val,
-                      ),
-                      Text(
-                        "${radius.toInt()} metros",
-                        style: const TextStyle(
-                          fontWeight: FontWeight.bold,
-                          color: Colors.blue,
-                        ),
-                      ),
+                      const SizedBox(height: 10),
                     ],
+                    
+                    const Text(
+                      "Radio de aviso",
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    Slider(
+                      value: radius,
+                      min: 200,
+                      max: 2000,
+                      onChanged: isActive
+                          ? null
+                          : (val) =>
+                                ref
+                                        .read(selectedRadiusProvider.notifier)
+                                        .state =
+                                    val,
+                    ),
+                    Text(
+                      "${radius.toInt()} metros",
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: Colors.blue,
+                      ),
+                    ),
                   ] else
                     const Text(
                       "Busca o toca el mapa para marcar tu destino",
