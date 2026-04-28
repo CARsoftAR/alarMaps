@@ -38,10 +38,16 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^3.0.1
+  flutter_launcher_icons: ^0.13.1
+
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: true
+  image_path: "assets/splash_1.png"
+  min_sdk_android: 21
 
 flutter:
   uses-material-design: true
   assets:
-    - assets/alarm.mp3
-    - assets/alarm 4.mp3
     - assets/splash.png
+    - assets/splash_1.png
