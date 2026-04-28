@@ -1,6 +1,8 @@
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:vibration/vibration.dart';
+import 'package:flutter_ringtone_player/flutter_ringtone_player.dart';
 
 class AlarmService {
   static final AlarmService _instance = AlarmService._internal();
@@ -8,13 +10,31 @@ class AlarmService {
   AlarmService._internal();
 
   final AudioPlayer _audioPlayer = AudioPlayer();
+  static const _channel = MethodChannel('com.example.alarmap/sounds');
   bool _isPlaying = false;
   bool? _hasVibrator;
 
   Future<void> init() async {
+    // Configurar el contexto de audio para que suene como alarma incluso en silencio (en Android)
+    final AudioContext audioContext = AudioContext(
+      iOS: AudioContextIOS(
+        category: AVAudioSessionCategory.playback,
+        options: {
+          AVAudioSessionOptions.defaultToSpeaker,
+          AVAudioSessionOptions.mixWithOthers,
+        },
+      ),
+      android: AudioContextAndroid(
+        contentType: AndroidContentType.music,
+        usageType: AndroidUsageType.media,
+        audioFocus: AndroidAudioFocus.gainTransient,
+      ),
+    );
+    AudioPlayer.global.setAudioContext(audioContext);
+
     await _audioPlayer.setReleaseMode(ReleaseMode.loop);
     _hasVibrator = await Vibration.hasVibrator();
-    _log('AlarmService inicializado');
+    _log('AlarmService inicializado con AudioContext');
   }
 
   void _log(String msg) {
@@ -23,30 +43,49 @@ class AlarmService {
 
   bool get isPlaying => _isPlaying;
 
-  Future<void> playAlarm() async {
-    if (_isPlaying) return;
+  Future<void> playAlarm({String? soundPath, String? uri, bool isAsset = false}) async {
+    if (_isPlaying) {
+      await stopAlarm(); 
+    }
 
     _isPlaying = true;
-    _log('Iniciando alarma');
+    _log('Iniciando alarma: ${uri ?? soundPath ?? 'alarm.mp3'} (Asset: $isAsset)');
 
     try {
-      // Configurar para flujo de alarma (Android)
-      await _audioPlayer.setVolume(1.0);
+      if (isAsset) {
+        final path = soundPath ?? 'alarm.mp3';
+        await _audioPlayer.setVolume(1.0);
+        await _audioPlayer.play(AssetSource(path));
+      } else if (uri != null) {
+        _log('Reproduciendo sonido de sistema vía Canal Nativo: $uri');
+        try {
+          await _channel.invokeMethod('playCustomRingtone', {
+            'uri': uri,
+            'volume': 1.0,
+          });
+        } catch (e) {
+          _log('Error en canal nativo, fallback a RingtonePlayer: $e');
+          await FlutterRingtonePlayer().play(
+            fromFile: uri,
+            looping: true,
+            volume: 1.0,
+            asAlarm: true,
+          );
+        }
+      } else {
+        await _audioPlayer.setVolume(1.0);
+        await _audioPlayer.play(AssetSource('alarm.mp3'));
+      }
+      
+      _log('Audio iniciado correctamente');
 
-      // Reproducir en loop
-      await _audioPlayer.play(AssetSource('alarm.mp3'));
-      _log('Audio iniciado');
-
-      // Iniciar vibración
       if (_hasVibrator == true) {
         _startVibrationPattern();
-        _log('Vibración iniciada');
-      } else {
-        _log('Dispositivo no tiene vibrador');
       }
     } catch (e) {
       _log('Error al iniciar alarma: $e');
-      _isPlaying = false;
+      // Fallback a sonido de sistema genérico si todo falla
+      await FlutterRingtonePlayer().playAlarm(looping: true, volume: 1.0);
     }
   }
 
@@ -65,8 +104,10 @@ class AlarmService {
 
     try {
       await _audioPlayer.stop();
+      await _channel.invokeMethod('stopAllSounds');
+      await FlutterRingtonePlayer().stop();
       Vibration.cancel();
-      _log('Alarma detenida');
+      _log('Alarma detenida exitosamente');
     } catch (e) {
       _log('Error al detener alarma: $e');
     }

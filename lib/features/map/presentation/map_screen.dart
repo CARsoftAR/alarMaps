@@ -10,11 +10,21 @@ import 'package:alarmap/core/services/simulation_service.dart';
 import 'package:alarmap/core/providers/favorites_provider.dart';
 import 'package:alarmap/features/settings/presentation/favorites_page.dart';
 import 'package:alarmap/core/models/favorite_location.dart';
+import 'package:alarmap/core/providers/alarm_provider.dart';
+import 'package:flutter_system_ringtones/flutter_system_ringtones.dart';
+import 'package:alarmap/core/services/location_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:alarmap/features/map/presentation/widgets/permission_guide.dart';
+import 'package:permission_handler/permission_handler.dart' as ph;
 import 'dart:async';
 import 'dart:math' as math;
+import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:alarmap/core/providers/pro_provider.dart';
+import 'package:alarmap/core/widgets/pro_dialog.dart';
 
 // State Providers
 final selectedDestinationProvider = StateProvider<LatLng?>((ref) => null);
+final currentDestinationAddressProvider = StateProvider<String?>((ref) => null);
 final selectedOriginProvider = StateProvider<LatLng?>((ref) => null);
 final selectedRadiusProvider = StateProvider<double>((ref) => 500.0);
 final currentDistanceProvider = StateProvider<double?>((ref) => null);
@@ -30,28 +40,127 @@ class MapScreen extends ConsumerStatefulWidget {
   ConsumerState<MapScreen> createState() => _MapScreenState();
 }
 
-class _MapScreenState extends ConsumerState<MapScreen> with SingleTickerProviderStateMixin {
+class _MapScreenState extends ConsumerState<MapScreen> with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   final MapController _mapController = MapController();
   final TextEditingController _destinationController = TextEditingController();
   final TextEditingController _originController = TextEditingController(text: "Mi ubicación");
   final SimulationService _simulationService = SimulationService();
   final AlarmService _alarmService = AlarmService();
+  final LocationService _locationService = LocationService();
+  
+  bool _waitingForPermission = false;
   
   StreamSubscription? _serviceSubscription;
   StreamSubscription? _locationSubscription;
   late AnimationController _pulseController;
+  
+
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _listenToService();
     _startLocationUpdates();
     _alarmService.init();
     _autoPositionOnStart();
+    
     _pulseController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1500),
     )..repeat(reverse: true);
+
+    // Iniciar chequeo de permisos
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkPermissionsOnStartup();
+    });
+  }
+
+  void _checkPermissionsOnStartup() async {
+    // Primero verificamos permisos básicos (While in use)
+    final basicStatus = await ph.Permission.location.status;
+    if (!basicStatus.isGranted) {
+      if (mounted) {
+        _showPermissionGuide(1, () async {
+          final granted = await _locationService.requestBasicPermission();
+          if (granted) _checkPermissionsOnStartup(); // Re-check para el siguiente paso (Background)
+        });
+      }
+      return;
+    }
+
+    // Luego verificamos el de segundo plano (Siempre)
+    final hasBackground = await _locationService.isBackgroundPermissionGranted();
+    if (!hasBackground && mounted) {
+      _showPermissionGuide(2, () {
+        _locationService.requestBackgroundPermission();
+      });
+      return;
+    }
+
+    _checkBatteryOptimization();
+  }
+
+  void _checkBatteryOptimization() async {
+    final status = await ph.Permission.ignoreBatteryOptimizations.status;
+    if (!status.isGranted) {
+      if (mounted) {
+        showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Optimización de batería'),
+            content: const Text('Para que la alarma funcione correctamente con la pantalla apagada, necesitamos que configures la app "Sin restricciones" en el uso de batería.'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('MÁS TARDE'),
+              ),
+              ElevatedButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                  ph.Permission.ignoreBatteryOptimizations.request();
+                },
+                child: const Text('CONFIGURAR'),
+              ),
+            ],
+          ),
+        );
+      }
+    }
+  }
+
+
+
+  void _showPermissionGuide(int step, VoidCallback onAction) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      useSafeArea: false,
+      builder: (context) => PermissionGuide(
+        step: step,
+        onTap: () {
+          Navigator.pop(context);
+          onAction();
+        },
+      ),
+    );
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _checkPermissionsOnResume();
+    }
+  }
+
+  void _checkPermissionsOnResume() async {
+    if (_waitingForPermission) {
+      final isGranted = await _locationService.isBackgroundPermissionGranted();
+      if (isGranted && mounted) {
+        setState(() => _waitingForPermission = false);
+        _activateAlarm();
+      }
+    }
   }
 
   void _listenToService() {
@@ -69,8 +178,14 @@ class _MapScreenState extends ConsumerState<MapScreen> with SingleTickerProvider
   }
 
   void _triggerManualAlarm() {
+    WakelockPlus.disable();
     ref.read(isAlarmActiveProvider.notifier).state = false;
-    _alarmService.playAlarm();
+    final alarm = ref.read(selectedAlarmProvider);
+    _alarmService.playAlarm(
+      soundPath: alarm.isAsset ? alarm.uri : null,
+      uri: alarm.isAsset ? null : alarm.uri,
+      isAsset: alarm.isAsset,
+    );
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -193,48 +308,9 @@ class _MapScreenState extends ConsumerState<MapScreen> with SingleTickerProvider
     return earthRadius * 2 * math.asin(math.sqrt(a));
   }
 
-  void _toggleSimulation() async {
-    if (ref.read(isSimulatingProvider)) {
-      _simulationService.stopSimulation();
-      ref.read(isSimulatingProvider.notifier).state = false;
-      return;
-    }
-
-    final start = ref.read(selectedOriginProvider) ?? ref.read(userLocationProvider);
-    final end = ref.read(selectedDestinationProvider);
-
-    if (start != null && end != null) {
-      ref.read(isSimulatingProvider.notifier).state = true;
-      _simulationService.startSimulation(
-        start: LatLng(start.latitude, start.longitude),
-        end: LatLng(end.latitude, end.longitude),
-        speedKmh: 120,
-        onStep: (point) async {
-          if (mounted) {
-            // Convertir de latlong2 a google_maps_flutter
-            final gPoint = LatLng(point.latitude, point.longitude);
-            ref.read(userLocationProvider.notifier).state = gPoint;
-            _updateDistanceOffline(gPoint);
-            
-            _mapController.move(gPoint, _mapController.camera.zoom);
-          }
-        },
-        onFinished: () {
-          if (mounted) {
-            ref.read(isSimulatingProvider.notifier).state = false;
-          }
-        },
-      );
-    } else {
-      String missing = "";
-      if (start == null) missing += "Origen (Tocá el botón azul)";
-      if (end == null) missing += (missing.isNotEmpty ? " y " : "") + "Destino";
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Falta: $missing")));
-    }
-  }
-
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _serviceSubscription?.cancel();
     _locationSubscription?.cancel();
     _pulseController.dispose();
@@ -252,7 +328,6 @@ class _MapScreenState extends ConsumerState<MapScreen> with SingleTickerProvider
     final isActive = ref.watch(isAlarmActiveProvider);
     final isSimulating = ref.watch(isSimulatingProvider);
     final showOriginField = ref.watch(showOriginFieldProvider);
-    final distance = ref.watch(currentDistanceProvider);
 
     return Scaffold(
       resizeToAvoidBottomInset: false,
@@ -263,10 +338,15 @@ class _MapScreenState extends ConsumerState<MapScreen> with SingleTickerProvider
             options: MapOptions(
               initialCenter: const LatLng(-34.6037, -58.3816),
               initialZoom: 14.0,
-              onTap: (tapPosition, point) {
+              onTap: (tapPosition, point) async {
                 if (!isActive && !isSimulating) {
                   ref.read(selectedDestinationProvider.notifier).state = point;
                   _destinationController.clear();
+                  
+                  // Obtener dirección aproximada para facilitar guardado en favoritos
+                  final address = await SearchService.reverseSearch(point);
+                  ref.read(currentDestinationAddressProvider.notifier).state = address;
+                  _destinationController.text = address;
                 }
               },
             ),
@@ -361,6 +441,7 @@ class _MapScreenState extends ConsumerState<MapScreen> with SingleTickerProvider
                                 if (res != null) {
                                   final gLocation = LatLng(res.location.latitude, res.location.longitude);
                                   ref.read(selectedDestinationProvider.notifier).state = gLocation;
+                                  ref.read(currentDestinationAddressProvider.notifier).state = res.displayFullName;
                                   _mapController.move(gLocation, 15);
                                 }
                               },
@@ -390,14 +471,6 @@ class _MapScreenState extends ConsumerState<MapScreen> with SingleTickerProvider
                     ],
                   ),
                 ),
-                const SizedBox(width: 12),
-                FloatingActionButton(
-                  heroTag: 'sim',
-                  backgroundColor: isSimulating ? Colors.red : Colors.green,
-                  onPressed: _toggleSimulation,
-                  elevation: 4,
-                  child: Icon(isSimulating ? Icons.stop : Icons.play_arrow, color: Colors.white),
-                ),
               ],
             ),
           ),
@@ -406,11 +479,22 @@ class _MapScreenState extends ConsumerState<MapScreen> with SingleTickerProvider
           Positioned(
             bottom: MediaQuery.of(context).size.height * 0.15 + 20,
             right: 16,
-            child: FloatingActionButton.small(
-              heroTag: 'loc',
+            child: FloatingActionButton(
+              key: const Key('my_location_button'),
+              onPressed: _autoPositionOnStart,
               backgroundColor: Colors.white,
-              onPressed: _getCurrentLocation,
               child: const Icon(Icons.my_location, color: Colors.blue),
+            ),
+          ),
+
+          // Botón de Campana (Seleccionar Alarma)
+          Positioned(
+            bottom: MediaQuery.of(context).size.height * 0.15 + 80,
+            right: 16,
+            child: FloatingActionButton(
+              onPressed: () => _showAlarmSelector(context, ref),
+              backgroundColor: Colors.white,
+              child: const Icon(Icons.notifications_active, color: Colors.blue),
             ),
           ),
 
@@ -451,6 +535,7 @@ class _MapScreenState extends ConsumerState<MapScreen> with SingleTickerProvider
   void _selectFavorite(WidgetRef ref, FavoriteLocation favorite) {
     final dest = LatLng(favorite.latitude, favorite.longitude);
     ref.read(selectedDestinationProvider.notifier).state = dest;
+    ref.read(currentDestinationAddressProvider.notifier).state = favorite.address;
     ref.read(selectedRadiusProvider.notifier).state = favorite.alarmRadius;
     _destinationController.text = favorite.address;
     
@@ -526,26 +611,226 @@ class _MapScreenState extends ConsumerState<MapScreen> with SingleTickerProvider
                 child: ScaleTransition(
                   scale: isActive ? Tween(begin: 1.0, end: 1.05).animate(_pulseController) : const AlwaysStoppedAnimation(1.0),
                   child: ElevatedButton(
-                    onPressed: destination == null ? null : () {
+                    onPressed: destination == null ? null : () async {
                       if (isActive) {
                         FlutterBackgroundService().invoke('stopTracking');
                         ref.read(isAlarmActiveProvider.notifier).state = false;
+                        WakelockPlus.disable();
                       } else {
-                        FlutterBackgroundService().invoke('setTarget', {
-                          'lat': destination.latitude, 'lng': destination.longitude, 'radius': radius,
-                        });
-                        ref.read(isAlarmActiveProvider.notifier).state = true;
+                        final basicGranted = await _locationService.checkPermissions();
+                        if (!basicGranted) {
+                          if (mounted) {
+                            _showPermissionGuide(1, () async {
+                              await _locationService.requestBasicPermission();
+                            });
+                          }
+                          return;
+                        }
+
+                        // Verificar permiso de SEGUNDO PLANO (Always)
+                        final hasBackground = await _locationService.isBackgroundPermissionGranted();
+                        if (!hasBackground) {
+                          if (mounted) {
+                            _showPermissionGuide(2, () {
+                              _locationService.requestBackgroundPermission();
+                            });
+                          }
+                          return;
+                        }
+
+                        _activateAlarm();
                       }
-                    },
-                    style: ElevatedButton.styleFrom(backgroundColor: isActive ? Colors.red : Colors.blue, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15))),
-                    child: Text(isActive ? "DETENER" : "ACTIVAR ALARMA", style: const TextStyle(fontWeight: FontWeight.bold)),
-                  ),
+                      },
+                      style: ElevatedButton.styleFrom(backgroundColor: isActive ? Colors.red : Colors.blue, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15))),
+                      child: Text(isActive ? "DETENER" : "ACTIVAR ALARMA", style: const TextStyle(fontWeight: FontWeight.bold)),
+                    ),
                 ),
               ),
             ],
           ),
         );
       },
+    );
+  }
+
+  void _activateAlarm() {
+    final destination = ref.read(selectedDestinationProvider);
+    final radius = ref.read(selectedRadiusProvider);
+    
+    if (destination != null) {
+      WakelockPlus.enable(); // WakeLock parcial para mantener el procesador activo
+      FlutterBackgroundService().invoke('setTarget', {
+        'lat': destination.latitude, 
+        'lng': destination.longitude, 
+        'radius': radius,
+        'alarm_uri': ref.read(selectedAlarmProvider).uri,
+        'is_asset': ref.read(selectedAlarmProvider).isAsset,
+      });
+      ref.read(isAlarmActiveProvider.notifier).state = true;
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("¡Alarma activada! Te avisaremos al llegar."),
+          backgroundColor: Colors.green,
+          behavior: SnackBarBehavior.floating,
+        )
+      );
+    }
+  }
+
+  void _showBackgroundPermissionDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Row(
+          children: [
+            Icon(Icons.security, color: Colors.blue),
+            SizedBox(width: 10),
+            Text('Permiso Necesario'),
+          ],
+        ),
+        content: const Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Para que la alarma suene con la pantalla apagada, Android requiere el permiso de ubicación "Permitir todo el tiempo".'),
+            SizedBox(height: 15),
+            Text('1. Toca en CONFIGURAR PERMISOS.\n2. Ve a "Permisos" > "Ubicación".\n3. Selecciona "Permitir todo el tiempo".', style: TextStyle(fontSize: 13, color: Colors.grey)),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('CANCELAR', style: TextStyle(color: Colors.grey)),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(context);
+              setState(() => _waitingForPermission = true);
+              _showPermissionGuide(2, () {
+                _locationService.requestBackgroundPermission();
+              });
+            },
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.blue, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
+            child: const Text('CONFIGURAR PERMISOS'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showAlarmSelector(BuildContext context, WidgetRef ref) async {
+    final current = ref.read(selectedAlarmProvider);
+    
+    // Mostrar un indicador de carga mientras obtenemos los sonidos del sistema
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => Container(
+        height: MediaQuery.of(context).size.height * 0.7,
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Column(
+          children: [
+            const SizedBox(height: 12),
+            Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(2))),
+            const Padding(
+              padding: EdgeInsets.all(20),
+              child: Text('Selecciona Sonido de Alarma', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+            ),
+            Expanded(
+              child: FutureBuilder<List<Ringtone>>(
+                future: FlutterSystemRingtones.getAlarmSounds(),
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState == ConnectionState.waiting) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  
+                  final systemAlarms = snapshot.data ?? [];
+                  final allOptions = [
+                    SelectedAlarm.defaultAlarm(),
+                    SelectedAlarm(title: 'Alarma Alternativa', uri: 'alarm 4.mp3', isAsset: true),
+                    ...systemAlarms.map((r) => SelectedAlarm(title: r.title, uri: r.uri, isAsset: false)),
+                  ];
+
+                  return ListView.builder(
+                    itemCount: allOptions.length,
+                    itemBuilder: (context, index) {
+                      final option = allOptions[index];
+                      final isSelected = current.uri == option.uri;
+                      
+                      return ListTile(
+                        leading: Icon(isSelected ? Icons.check_circle : Icons.radio_button_unchecked, color: isSelected ? Colors.green : Colors.grey),
+                        title: Text(option.title, style: TextStyle(fontWeight: isSelected ? FontWeight.bold : FontWeight.normal)),
+                        trailing: IconButton(
+                          icon: Icon(isSelected && _alarmService.isPlaying ? Icons.stop : Icons.play_arrow, color: Colors.blue),
+                          onPressed: () async {
+                            final isPro = ref.read(isProUserProvider);
+                            final isDefault = option.uri == 'alarm.mp3';
+
+                            if (!isPro && !isDefault) {
+                              ProDialog.show(
+                                context,
+                                title: 'Personaliza tu viaje',
+                                message: 'La opción de cambiar el sonido de la alarma es exclusiva de ALARMap PRO. ¡Desbloquéala ahora!',
+                              );
+                              return;
+                            }
+
+                            if (_alarmService.isPlaying) {
+                              await _alarmService.stopAlarm();
+                              if (mounted) setState(() {}); // Refrescar iconos
+                            } else {
+                              await _alarmService.playAlarm(
+                                soundPath: option.isAsset ? option.uri : null,
+                                uri: option.isAsset ? null : option.uri,
+                                isAsset: option.isAsset,
+                              );
+                              if (mounted) setState(() {});
+                              
+                              // Detener automáticamente tras 6 segundos
+                              Future.delayed(const Duration(seconds: 6), () {
+                                if (mounted && _alarmService.isPlaying) {
+                                  _alarmService.stopAlarm();
+                                  if (mounted) setState(() {});
+                                }
+                              });
+                            }
+                          },
+                        ),
+                        onTap: () {
+                          final isPro = ref.read(isProUserProvider);
+                          final isDefault = option.uri == 'alarm.mp3';
+
+                          if (!isPro && !isDefault) {
+                            ProDialog.show(
+                              context,
+                              title: 'Personaliza tu viaje',
+                              message: 'La opción de cambiar el sonido de la alarma es exclusiva de ALARMap PRO. ¡Desbloquéala ahora!',
+                            );
+                            return;
+                          }
+
+                          ref.read(selectedAlarmProvider.notifier).setAlarm(option);
+                          Navigator.pop(context);
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text('Alarma fijada: ${option.title}'), duration: const Duration(seconds: 2))
+                          );
+                        },
+                      );
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

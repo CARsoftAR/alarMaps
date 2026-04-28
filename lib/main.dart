@@ -3,7 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:alarmap/core/services/background_service.dart';
 import 'package:alarmap/core/services/location_service.dart';
-import 'package:alarmap/features/map/presentation/map_screen.dart';
+import 'package:alarmap/features/splash/presentation/splash_screen.dart';
+
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -47,7 +48,7 @@ class AlarMapApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: const MapScreen(),
+      home: const SplashScreen(),
     );
   }
 }

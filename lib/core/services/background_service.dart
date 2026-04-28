@@ -4,7 +4,9 @@ import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_background_service_android/flutter_background_service_android.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter/services.dart';
 import 'package:vibration/vibration.dart';
+import 'package:flutter_ringtone_player/flutter_ringtone_player.dart';
 import 'package:latlong2/latlong.dart';
 import 'location_service.dart';
 
@@ -35,7 +37,7 @@ class BackgroundServiceManager {
         isForegroundMode: true,
         notificationChannelId: notificationChannelId,
         initialNotificationTitle: 'AlarMap Activo',
-        initialNotificationContent: 'AlarMap está monitoreando tu viaje',
+        initialNotificationContent: 'Alarmaps está monitoreando tu ubicación',
         foregroundServiceNotificationId: notificationId,
       ),
       iosConfiguration: IosConfiguration(
@@ -59,6 +61,25 @@ void onStart(ServiceInstance service) async {
   DartPluginRegistrant.ensureInitialized();
 
   final AudioPlayer audioPlayer = AudioPlayer();
+  const soundsChannel = MethodChannel('com.example.alarmap/sounds');
+  
+  // Configurar el contexto de audio para el servicio de fondo (importante para sonar en silencio/background)
+  final AudioContext audioContext = AudioContext(
+    iOS: AudioContextIOS(
+      category: AVAudioSessionCategory.playback,
+      options: {
+        AVAudioSessionOptions.defaultToSpeaker,
+        AVAudioSessionOptions.mixWithOthers,
+      },
+    ),
+    android: AudioContextAndroid(
+      contentType: AndroidContentType.music,
+      usageType: AndroidUsageType.media,
+      audioFocus: AndroidAudioFocus.gainTransient,
+    ),
+  );
+  AudioPlayer.global.setAudioContext(audioContext);
+
   final locationService = LocationService();
   
   service.on('setTarget').listen((event) {
@@ -66,14 +87,40 @@ void onStart(ServiceInstance service) async {
       final double lat = event['lat'];
       final double lng = event['lng'];
       final double radius = event['radius'] ?? 500.0;
-
+      final String? alarmUri = event['alarm_uri'];
+      final bool isAsset = event['is_asset'] ?? false;
+      
       locationService.startTracking(
         destination: LatLng(lat, lng),
         radiusInMeters: radius,
         onTargetReached: () async {
           await audioPlayer.setReleaseMode(ReleaseMode.loop);
+          await audioPlayer.setVolume(1.0);
           try {
-            await audioPlayer.play(AssetSource('alarm.mp3'));
+            audioPlayer.setVolume(1.0);
+            audioPlayer.setReleaseMode(ReleaseMode.loop);
+            
+            if (isAsset) {
+              await audioPlayer.play(AssetSource(alarmUri ?? 'alarm.mp3'));
+            } else if (alarmUri != null) {
+              try {
+                // Prioridad 1: Canal Nativo (RingtoneManager)
+                await soundsChannel.invokeMethod('playCustomRingtone', {
+                  'uri': alarmUri,
+                  'volume': 1.0,
+                });
+              } catch (e) {
+                // Fallback: RingtonePlayer
+                await FlutterRingtonePlayer().play(
+                  fromFile: alarmUri,
+                  looping: true,
+                  volume: 1.0,
+                  asAlarm: true,
+                );
+              }
+            } else {
+              await audioPlayer.play(AssetSource('alarm.mp3'));
+            }
           } catch (e) {}
 
           if (await Vibration.hasVibrator() ?? false) {
@@ -88,13 +135,35 @@ void onStart(ServiceInstance service) async {
               content: "La alarma está sonando. Toca para detener.",
             );
           }
+
+          // Full Screen Intent Notification
+          final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+          const AndroidNotificationDetails androidPlatformChannelSpecifics = AndroidNotificationDetails(
+            'alarm_trigger_channel',
+            'Alarma de Llegada',
+            channelDescription: 'Canal para despertar el teléfono al llegar',
+            importance: Importance.max,
+            priority: Priority.high,
+            fullScreenIntent: true,
+            ongoing: true,
+            autoCancel: false,
+            visibility: NotificationVisibility.public,
+          );
+          const NotificationDetails platformChannelSpecifics = NotificationDetails(android: androidPlatformChannelSpecifics);
+          
+          await flutterLocalNotificationsPlugin.show(
+            889,
+            '¡HAS LLEGADO A TU DESTINO!',
+            'La alarma de ubicación se ha activado.',
+            platformChannelSpecifics,
+          );
         },
         onDistanceUpdate: (distance) {
           service.invoke('updateDistance', {'distance': distance});
           if (service is AndroidServiceInstance) {
             service.setForegroundNotificationInfo(
-              title: "Monitoreando viaje",
-              content: "A ${distance.toStringAsFixed(0)}m de tu destino",
+              title: "AlarMap",
+              content: "Alarmaps está monitoreando tu ubicación",
             );
           }
         },
@@ -105,7 +174,13 @@ void onStart(ServiceInstance service) async {
   service.on('stopTracking').listen((event) async {
     await locationService.stopTracking();
     await audioPlayer.stop();
+    await soundsChannel.invokeMethod('stopAllSounds');
+    FlutterRingtonePlayer().stop();
     Vibration.cancel();
+    
+    final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+    await flutterLocalNotificationsPlugin.cancel(889); // Cancel the full screen notification
+
     if (service is AndroidServiceInstance) {
       service.setForegroundNotificationInfo(
         title: "AlarMap",

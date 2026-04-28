@@ -5,6 +5,9 @@ import 'package:latlong2/latlong.dart';
 import '../../../core/models/favorite_location.dart';
 import '../../../core/providers/favorites_provider.dart';
 import '../../../core/services/search_service.dart';
+import '../../../core/providers/pro_provider.dart';
+import '../../../core/widgets/pro_dialog.dart';
+import '../../map/presentation/map_screen.dart';
 
 class FavoritesPage extends ConsumerWidget {
   const FavoritesPage({super.key});
@@ -160,6 +163,18 @@ class _AddEditFavoriteFormState extends ConsumerState<_AddEditFavoriteForm> {
       _radius = widget.favorite!.alarmRadius;
       _validatedLocation = LatLng(widget.favorite!.latitude, widget.favorite!.longitude);
       _validatedAddress = widget.favorite!.address;
+    } else {
+      // Si es un nuevo favorito, intentamos pre-cargar el destino actual del mapa
+      final currentDest = ref.read(selectedDestinationProvider);
+      final currentAddr = ref.read(currentDestinationAddressProvider);
+      
+      if (currentDest != null) {
+        _validatedLocation = currentDest;
+        if (currentAddr != null) {
+          _addressController.text = currentAddr;
+          _validatedAddress = currentAddr;
+        }
+      }
     }
   }
 
@@ -293,6 +308,18 @@ class _AddEditFavoriteFormState extends ConsumerState<_AddEditFavoriteForm> {
     );
 
     if (widget.favorite == null) {
+      final isPro = ref.read(isProUserProvider);
+      final currentFavorites = ref.read(favoritesProvider);
+      
+      if (!isPro && currentFavorites.length >= 3) {
+        ProDialog.show(
+          context,
+          title: '¡Te quedaste sin espacio!',
+          message: 'En la versión gratuita puedes guardar hasta 3 destinos. Pásate a PRO para tener favoritos ilimitados y viajar sin límites.',
+        );
+        return;
+      }
+
       ref.read(favoritesProvider.notifier).addFavorite(favorite);
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Destino guardado con éxito'), backgroundColor: Colors.green)
