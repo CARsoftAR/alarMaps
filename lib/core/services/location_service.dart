@@ -4,6 +4,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:permission_handler/permission_handler.dart' as ph;
+import 'package:alarmap/core/models/alarm_state.dart';
 
 class LocationService {
   static final LocationService _instance = LocationService._internal();
@@ -16,34 +17,25 @@ class LocationService {
 
   static const double _earthRadius = 6371000;
   
-  static const String _keyLat = 'alarm_lat';
-  static const String _keyLng = 'alarm_lng';
-  static const String _keyRadius = 'alarm_radius';
-  static const String _keyIsActive = 'alarm_is_active';
-
-  Future<void> _saveTarget(LatLng destination, double radius) async {
+  Future<void> _saveTarget(LatLng destination, double radius, {String? audioUri, bool isAsset = false, String? name}) async {
+    await AlarmState().saveToDisk(destination: destination, radius: radius, name: name ?? "Destino");
+    // El audioUri y isAsset se pueden guardar también en AlarmState si se desea unificación total
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setDouble(_keyLat, destination.latitude);
-    await prefs.setDouble(_keyLng, destination.longitude);
-    await prefs.setDouble(_keyRadius, radius);
-    await prefs.setBool(_keyIsActive, true);
+    if (audioUri != null) await prefs.setString('alarm_audio_uri', audioUri);
+    await prefs.setBool('alarm_is_asset', isAsset);
   }
 
   Future<void> clearTarget() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(_keyIsActive, false);
+    await AlarmState().clearDisk();
   }
 
   Future<Map<String, dynamic>?> checkActiveAlarm() async {
-    final prefs = await SharedPreferences.getInstance();
-    final isActive = prefs.getBool(_keyIsActive) ?? false;
-    
-    if (isActive) {
-      return {
-        'lat': prefs.getDouble(_keyLat),
-        'lng': prefs.getDouble(_keyLng),
-        'radius': prefs.getDouble(_keyRadius),
-      };
+    final data = await AlarmState().loadFromDisk();
+    if (data != null) {
+      final prefs = await SharedPreferences.getInstance();
+      data['alarm_uri'] = prefs.getString('alarm_audio_uri');
+      data['is_asset'] = prefs.getBool('alarm_is_asset') ?? false;
+      return data;
     }
     return null;
   }
@@ -82,11 +74,14 @@ class LocationService {
   void startTracking({
     required LatLng destination,
     required double radiusInMeters,
+    String? audioUri,
+    bool isAsset = false,
+    String? name,
     required Function() onTargetReached,
     Function(double distance)? onDistanceUpdate,
   }) async {
     await stopTracking();
-    await _saveTarget(destination, radiusInMeters);
+    await _saveTarget(destination, radiusInMeters, audioUri: audioUri, isAsset: isAsset, name: name);
     _consecutiveReadingsInRadius = 0;
 
     // Usar configuraciones específicas para Android para mejorar el segundo plano

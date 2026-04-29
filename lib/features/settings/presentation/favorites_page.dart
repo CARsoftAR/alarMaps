@@ -267,12 +267,13 @@ class _AddEditFavoriteFormState extends ConsumerState<_AddEditFavoriteForm> {
 
     setState(() => _isValidating = true);
     
-    final result = await SearchService.performHardSearch(query);
+    final resultList = await SearchService.performHardSearch(query);
     
     if (mounted) {
       setState(() {
         _isValidating = false;
-        if (result != null) {
+        if (resultList.isNotEmpty) {
+          final result = resultList.first;
           _validatedLocation = result.location;
           _validatedAddress = result.displayFullName;
           _addressController.text = result.displayFullName;

@@ -4,6 +4,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:flutter_native_splash/flutter_native_splash.dart';
 import 'package:alarmap/core/services/search_service.dart';
 import 'package:alarmap/core/services/alarm_service.dart';
 import 'package:alarmap/core/services/simulation_service.dart';
@@ -21,12 +22,14 @@ import 'dart:math' as math;
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:alarmap/core/providers/pro_provider.dart';
 import 'package:alarmap/core/widgets/pro_dialog.dart';
+import 'package:alarmap/core/models/alarm_state.dart';
+import 'package:alarmap/features/alarm/presentation/alarm_alert_screen.dart';
 
 // State Providers
 final selectedDestinationProvider = StateProvider<LatLng?>((ref) => null);
 final currentDestinationAddressProvider = StateProvider<String?>((ref) => null);
 final selectedOriginProvider = StateProvider<LatLng?>((ref) => null);
-final selectedRadiusProvider = StateProvider<double>((ref) => 500.0);
+final selectedRadiusProvider = StateProvider<double>((ref) => 200.0);
 final currentDistanceProvider = StateProvider<double?>((ref) => null);
 final isAlarmActiveProvider = StateProvider<bool>((ref) => false);
 final userLocationProvider = StateProvider<LatLng?>((ref) => null);
@@ -49,6 +52,7 @@ class _MapScreenState extends ConsumerState<MapScreen> with SingleTickerProvider
   final LocationService _locationService = LocationService();
   
   bool _waitingForPermission = false;
+  List<SearchResult> _suggestions = []; // Sugerencias de Google Places
   
   StreamSubscription? _serviceSubscription;
   StreamSubscription? _locationSubscription;
@@ -64,14 +68,24 @@ class _MapScreenState extends ConsumerState<MapScreen> with SingleTickerProvider
     _startLocationUpdates();
     _alarmService.init();
     _autoPositionOnStart();
+    _loadActiveAlarm();
     
     _pulseController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1500),
     )..repeat(reverse: true);
+    
+    // Escuchar respuesta del servicio por si el disco falla
+    FlutterBackgroundService().on('targetResponse').listen((data) {
+      if (data != null && mounted) {
+        debugPrint('🛰️ [MapScreen] Recibida respuesta de emergencia del Servicio: ${data['name']}');
+        _syncUIWithData(data);
+      }
+    });
 
-    // Iniciar chequeo de permisos
+    // Iniciar chequeo de permisos y remover splash nativo
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      FlutterNativeSplash.remove();
       _checkPermissionsOnStartup();
     });
   }
@@ -170,41 +184,8 @@ class _MapScreenState extends ConsumerState<MapScreen> with SingleTickerProvider
       }
     });
 
-    FlutterBackgroundService().on('alarmTriggered').listen((event) {
-      if (mounted && !ref.read(isSimulatingProvider)) {
-        _triggerManualAlarm();
-      }
-    });
   }
 
-  void _triggerManualAlarm() {
-    WakelockPlus.disable();
-    ref.read(isAlarmActiveProvider.notifier).state = false;
-    final alarm = ref.read(selectedAlarmProvider);
-    _alarmService.playAlarm(
-      soundPath: alarm.isAsset ? alarm.uri : null,
-      uri: alarm.isAsset ? null : alarm.uri,
-      isAsset: alarm.isAsset,
-    );
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        title: const Text('¡HAS LLEGADO!'),
-        content: const Text('La alarma sonora se activó por proximidad GPS.'),
-        actions: [
-          TextButton(
-            onPressed: () {
-              _alarmService.stopAlarm();
-              FlutterBackgroundService().invoke('stopTracking');
-              Navigator.pop(context);
-            },
-            child: const Text('DETENER ALARMA'),
-          ),
-        ],
-      ),
-    );
-  }
 
   void _startLocationUpdates() async {
     _locationSubscription = Geolocator.getPositionStream(
@@ -235,11 +216,14 @@ class _MapScreenState extends ConsumerState<MapScreen> with SingleTickerProvider
       Position position = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
       final latLng = LatLng(position.latitude, position.longitude);
       
-      _mapController.move(latLng, 15);
-      
       if (mounted) {
         ref.read(userLocationProvider.notifier).state = latLng;
         ref.read(selectedOriginProvider.notifier).state = latLng;
+        
+        // Solo mover si no hay una alarma activa para no pisar la restauración de la misma
+        if (!ref.read(isAlarmActiveProvider)) {
+          _mapController.move(latLng, 15);
+        }
       }
     } catch (e) {
       debugPrint("Error en auto posicionamiento inicial: $e");
@@ -293,7 +277,9 @@ class _MapScreenState extends ConsumerState<MapScreen> with SingleTickerProvider
       if (ref.read(isSimulatingProvider) && distance <= ref.read(selectedRadiusProvider)) {
         _simulationService.stopSimulation();
         ref.read(isSimulatingProvider.notifier).state = false;
-        _triggerManualAlarm();
+        Navigator.of(context).push(
+          MaterialPageRoute(builder: (context) => const AlarmAlertScreen()),
+        );
       }
     }
   }
@@ -413,8 +399,9 @@ class _MapScreenState extends ConsumerState<MapScreen> with SingleTickerProvider
                               TextField(
                                 controller: _originController,
                                 onSubmitted: (val) async {
-                                  final res = await SearchService.performHardSearch(val);
-                                  if (res != null) {
+                                  final results = await SearchService.performHardSearch(val);
+                                  if (results.isNotEmpty) {
+                                    final res = results.first;
                                     final gLocation = LatLng(res.location.latitude, res.location.longitude);
                                     ref.read(selectedOriginProvider.notifier).state = gLocation;
                                     _mapController.move(gLocation, 15);
@@ -436,13 +423,11 @@ class _MapScreenState extends ConsumerState<MapScreen> with SingleTickerProvider
                             ],
                             TextField(
                               controller: _destinationController,
+                              onChanged: (val) => _onSearchChanged(val),
                               onSubmitted: (val) async {
-                                final res = await SearchService.performHardSearch(val);
-                                if (res != null) {
-                                  final gLocation = LatLng(res.location.latitude, res.location.longitude);
-                                  ref.read(selectedDestinationProvider.notifier).state = gLocation;
-                                  ref.read(currentDestinationAddressProvider.notifier).state = res.displayFullName;
-                                  _mapController.move(gLocation, 15);
+                                final results = await SearchService.performHardSearch(val);
+                                if (results.isNotEmpty) {
+                                  _selectSearchResult(results.first);
                                 }
                               },
                               decoration: InputDecoration(
@@ -465,6 +450,26 @@ class _MapScreenState extends ConsumerState<MapScreen> with SingleTickerProvider
                           ],
                         ),
                       ),
+                      // Lista de sugerencias dinámica
+                      if (_suggestions.isNotEmpty)
+                        Container(
+                          margin: const EdgeInsets.only(top: 4),
+                          constraints: const BoxConstraints(maxHeight: 200),
+                          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(15), boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 10)]),
+                          child: ListView.builder(
+                            shrinkWrap: true,
+                            padding: EdgeInsets.zero,
+                            itemCount: _suggestions.length,
+                            itemBuilder: (context, index) {
+                              final res = _suggestions[index];
+                              return ListTile(
+                                leading: const Icon(Icons.location_on, size: 18, color: Colors.grey),
+                                title: Text(res.displayFullName, style: const TextStyle(fontSize: 13)),
+                                onTap: () => _selectSearchResult(res),
+                              );
+                            },
+                          ),
+                        ),
                       const SizedBox(height: 8),
                       // Fila de botones rápidos de favoritos
                       _buildFavoritesShortcuts(ref),
@@ -616,6 +621,7 @@ class _MapScreenState extends ConsumerState<MapScreen> with SingleTickerProvider
                         FlutterBackgroundService().invoke('stopTracking');
                         ref.read(isAlarmActiveProvider.notifier).state = false;
                         WakelockPlus.disable();
+                        _clearAlarmFromPrefs();
                       } else {
                         final basicGranted = await _locationService.checkPermissions();
                         if (!basicGranted) {
@@ -653,7 +659,7 @@ class _MapScreenState extends ConsumerState<MapScreen> with SingleTickerProvider
     );
   }
 
-  void _activateAlarm() {
+  Future<void> _activateAlarm() async {
     final destination = ref.read(selectedDestinationProvider);
     final radius = ref.read(selectedRadiusProvider);
     
@@ -665,8 +671,16 @@ class _MapScreenState extends ConsumerState<MapScreen> with SingleTickerProvider
         'radius': radius,
         'alarm_uri': ref.read(selectedAlarmProvider).uri,
         'is_asset': ref.read(selectedAlarmProvider).isAsset,
+        'name': ref.read(currentDestinationAddressProvider),
       });
       ref.read(isAlarmActiveProvider.notifier).state = true;
+      
+      // GRABACIÓN INMEDIATA (Await de SharedPreferences)
+      await AlarmState().saveToDisk(
+        destination: destination,
+        radius: radius,
+        name: ref.read(currentDestinationAddressProvider) ?? "Destino",
+      );
       
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -675,6 +689,87 @@ class _MapScreenState extends ConsumerState<MapScreen> with SingleTickerProvider
           behavior: SnackBarBehavior.floating,
         )
       );
+    }
+  }
+
+
+  Future<void> _clearAlarmFromPrefs() async {
+    await AlarmState().clearDisk();
+  }
+
+  Future<void> _loadActiveAlarm() async {
+    final activeAlarm = await AlarmState.instance.loadFromDisk();
+    
+    if (activeAlarm != null) {
+      _syncUIWithData(activeAlarm);
+    } else {
+      // Si el disco está vacío, le preguntamos al servicio como fuente de verdad
+      debugPrint('🔍 [MapScreen] Disco vacío, consultando al Servicio...');
+      FlutterBackgroundService().invoke('askTarget');
+    }
+  }
+
+  void _onSearchChanged(String query) async {
+    if (query.length > 2) {
+      final results = await SearchService.performHardSearch(query);
+      if (mounted) {
+        setState(() {
+          _suggestions = results;
+        });
+      }
+    } else if (_suggestions.isNotEmpty) {
+      setState(() {
+        _suggestions = [];
+      });
+    }
+  }
+
+  void _selectSearchResult(SearchResult res) {
+    final gLocation = res.location;
+    ref.read(selectedDestinationProvider.notifier).state = gLocation;
+    ref.read(currentDestinationAddressProvider.notifier).state = res.displayFullName;
+    _destinationController.text = res.displayFullName;
+    
+    // Mover Marcador y Cámara de forma sincronizada
+    _mapController.move(gLocation, 15);
+    
+    // Actualizar distancia inmediata para la UI
+    final currentPos = ref.read(userLocationProvider) ?? ref.read(selectedOriginProvider);
+    if (currentPos != null) {
+      ref.read(currentDistanceProvider.notifier).state = _calculateHaversine(currentPos, gLocation);
+    }
+
+    setState(() {
+      _suggestions = [];
+    });
+    
+    debugPrint('📍 [Search] Posición sincronizada: ${gLocation.latitude}, ${gLocation.longitude}');
+  }
+
+  void _syncUIWithData(Map<String, dynamic> data) {
+    final lat = data['lat'];
+    final lng = data['lng'];
+    final radius = data['radius'];
+    final name = data['name'];
+    
+    if (lat != null && lng != null) {
+      final destination = LatLng(lat, lng);
+      
+      // Actualizar Providers de Riverpod
+      ref.read(selectedDestinationProvider.notifier).state = destination;
+      ref.read(selectedRadiusProvider.notifier).state = (radius as num?)?.toDouble() ?? 200.0;
+      ref.read(currentDestinationAddressProvider.notifier).state = name;
+      ref.read(isAlarmActiveProvider.notifier).state = true;
+      _destinationController.text = name ?? "";
+      
+      // Forzar reconstrucción de la UI (Obligatorio según pedido)
+      setState(() {});
+
+      Future.delayed(const Duration(milliseconds: 500), () {
+        if (mounted) {
+          _mapController.move(destination, 15);
+        }
+      });
     }
   }
 

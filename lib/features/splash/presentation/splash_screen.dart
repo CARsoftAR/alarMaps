@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:alarmap/features/map/presentation/map_screen.dart';
+import 'package:flutter_native_splash/flutter_native_splash.dart';
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
@@ -13,6 +14,12 @@ class _SplashScreenState extends State<SplashScreen> {
   @override
   void initState() {
     super.initState();
+    
+    // Remover el splash nativo una vez que el primer frame de Flutter esté listo
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      FlutterNativeSplash.remove();
+    });
+
     // Ocultar la barra de estado para una experiencia inmersiva
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
 
@@ -32,16 +39,15 @@ class _SplashScreenState extends State<SplashScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Stack(
-        children: [
-          // Imagen que ocupa todo el fondo
-          Image.asset(
-            'assets/splash_1.png',
-            width: double.infinity,
-            height: double.infinity,
-            fit: BoxFit.cover,
+      backgroundColor: Colors.black, // Fondo negro para coherencia
+      body: Center(
+        child: SizedBox(
+          width: 250, // Tamaño fijo unificado con el Splash Nativo
+          child: Image.asset(
+            'assets/splash_1.jpg',
+            fit: BoxFit.contain, // Escalar sin recortar
           ),
-        ],
+        ),
       ),
     );
   }

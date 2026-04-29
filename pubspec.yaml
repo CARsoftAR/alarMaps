@@ -30,6 +30,7 @@ dependencies:
   flutter_ringtone_player: ^4.0.0+4
   permission_handler: ^11.3.1
   wakelock_plus: ^1.6.0
+  flutter_native_splash: ^2.4.7
 
 dependency_overrides:
   latlong2: 0.9.0
@@ -43,11 +44,20 @@ dev_dependencies:
 flutter_launcher_icons:
   android: "launcher_icon"
   ios: true
-  image_path: "assets/splash_1.png"
+  image_path: "assets/splash_1.jpg"
   min_sdk_android: 21
+
+flutter_native_splash:
+  color: "#000000"
+  image: "assets/splash_1.jpg"
+  android: true
+  ios: true
+  android_12:
+    color: "#000000"
+    image: "assets/splash_1.jpg"
 
 flutter:
   uses-material-design: true
   assets:
     - assets/splash.png
-    - assets/splash_1.png
+    - assets/splash_1.jpg

@@ -25,9 +25,9 @@ class SearchService {
     if (kDebugMode) debugPrint('[SEARCH-GEO] $message');
   }
 
-  /// Búsqueda usando Google Geocoding API para mayor precisión con lugares como estaciones, etc.
-  static Future<SearchResult?> performHardSearch(String query) async {
-    if (query.trim().isEmpty) return null;
+  /// Búsqueda usando Google Geocoding API para obtener lista de sugerencias
+  static Future<List<SearchResult>> performHardSearch(String query) async {
+    if (query.trim().isEmpty) return [];
 
     _log('Ejecutando búsqueda en Google Geocoding para: "$query"');
 
@@ -44,41 +44,29 @@ class SearchService {
 
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
-        if (data['status'] == 'OK' && data['results'].isNotEmpty) {
-          final result = data['results'][0];
-          final geometry = result['geometry']['location'];
-          final latLng = LatLng(geometry['lat'], geometry['lng']);
-          
-          String fullName = result['formatted_address'];
-          String shortName = query; // Default fallback
-
-          // Tratar de sacar un nombre corto del address_components
-          if (result['address_components'] != null) {
-            final components = result['address_components'] as List;
-            if (components.isNotEmpty) {
-              shortName = components[0]['short_name'];
-              if (components.length > 1 && components[0]['types'].contains('street_number')) {
-                 shortName = '${components[1]['short_name']} ${components[0]['short_name']}';
-              }
-            }
-          }
-
-          _log('Google API encontró: $fullName');
-
-          return SearchResult(
-            displayShortName: shortName,
-            displayFullName: fullName,
-            location: latLng,
-            isExactMatch: true,
-          );
+        if (data['status'] == 'OK' && data['results'] != null) {
+          final results = data['results'] as List;
+          return results.map((result) {
+            final geometry = result['geometry']['location'];
+            final latLng = LatLng(geometry['lat'], geometry['lng']);
+            final fullName = result['formatted_address'];
+            
+            return SearchResult(
+              displayShortName: query,
+              displayFullName: fullName,
+              location: latLng,
+              isExactMatch: true,
+            );
+          }).toList();
         }
       }
       
       _log('Google API no encontró resultados o falló, intentando geocoding nativo...');
-      return await _fallbackNativeSearch(searchAddress);
+      final fallback = await _fallbackNativeSearch(searchAddress);
+      return fallback != null ? [fallback] : [];
     } catch (e) {
       _log('Error en búsqueda: $e');
-      return null;
+      return [];
     }
   }
 
