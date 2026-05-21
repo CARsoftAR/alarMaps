@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:alarmap/features/map/presentation/map_screen.dart';
+import 'package:alarmap/features/terms/presentation/required_config_screen.dart';
 import 'package:flutter_native_splash/flutter_native_splash.dart';
 
 class TermsScreen extends StatefulWidget {
@@ -28,7 +29,7 @@ class _TermsScreenState extends State<TermsScreen> {
     await prefs.setBool('terms_accepted', true);
     if (mounted) {
       Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (context) => const MapScreen()),
+        MaterialPageRoute(builder: (context) => const RequiredConfigScreen()),
       );
     }
   }
