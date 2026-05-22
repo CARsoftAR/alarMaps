@@ -4,12 +4,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:alarmap/features/map/presentation/map_screen.dart';
 import 'package:android_intent_plus/android_intent.dart';
 import 'package:package_info_plus/package_info_plus.dart';
-import 'package:alarmap/core/services/location_service.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_ringtone_player/flutter_ringtone_player.dart';
-import 'package:alarmap/full_screen_permission_helper.dart';
-
-enum ConfigOption { location, battery, overlay }
 
 class RequiredConfigScreen extends StatefulWidget {
   const RequiredConfigScreen({super.key});
@@ -24,7 +19,6 @@ class _RequiredConfigScreenState extends State<RequiredConfigScreen>
   bool _isBatteryOk = false;
   bool _isOverlayOk = false;
   bool _isLoading = true;
-  ConfigOption _selectedOption = ConfigOption.location;
 
   @override
   void initState() {
@@ -74,339 +68,214 @@ class _RequiredConfigScreenState extends State<RequiredConfigScreen>
         _isBatteryOk = batteryOk;
         _isOverlayOk = overlayOk;
         _isLoading = false;
-
-        // Auto-selección lógica según prioridad de fallos
-        if (!_isGpsOk) {
-          _selectedOption = ConfigOption.location;
-        } else if (!_isBatteryOk) {
-          _selectedOption = ConfigOption.battery;
-        } else if (!_isOverlayOk) {
-          _selectedOption = ConfigOption.overlay;
-        }
       });
     }
   }
 
-  void _playSuccessSound() {
+  Future<void> _playSuccessSound() async {
     try {
-      FlutterRingtonePlayer().play(
-        android: AndroidSounds.notification,
-        ios: IosSounds.glass,
-      );
+      await FlutterRingtonePlayer().playNotification();
     } catch (e) {
       debugPrint('Error en sonido: $e');
     }
   }
 
-  Future<void> _handleMainAction() async {
-    final pkg = (await PackageInfo.fromPlatform()).packageName;
-
-    switch (_selectedOption) {
-      case ConfigOption.location:
-        // Paso A: Pedir permiso normal (Foreground)
-        final status = await Permission.location.request();
-
-        // Paso B: Si aceptó el normal, redirigir a ajustes para 'Always' (Background) en Android 11+
-        if (status.isGranted) {
-          final alwaysStatus = await Permission.locationAlways.status;
-          if (!alwaysStatus.isGranted) {
-            await AndroidIntent(
-              action: 'android.settings.APPLICATION_DETAILS_SETTINGS',
-              data: 'package:$pkg',
-            ).launch();
-          }
-        }
-        break;
-      case ConfigOption.battery:
-        await AndroidIntent(
-          action: 'android.settings.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
-          data: 'package:$pkg',
-        ).launch();
-        break;
-      case ConfigOption.overlay:
-        await AndroidIntent(
-          action: 'android.settings.action.MANAGE_OVERLAY_PERMISSION',
-          data: 'package:$pkg',
-        ).launch();
-        break;
+  Future<void> _reqLocation() async {
+    final status = await Permission.location.request();
+    if (status.isGranted) {
+      final alwaysStatus = await Permission.locationAlways.status;
+      if (!alwaysStatus.isGranted) {
+        await Permission.locationAlways.request();
+      }
     }
   }
 
-  // Prioridad de UI: Las 3 variables deben ser verdaderas para habilitar el mapa
-  bool get _allDone => _isGpsOk && _isBatteryOk && _isOverlayOk;
+  Future<void> _reqBattery() async {
+    final pkg = (await PackageInfo.fromPlatform()).packageName;
+    await AndroidIntent(
+      action: 'android.settings.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
+      data: 'package:$pkg',
+    ).launch();
+  }
 
-  String _getLocationDescription() {
-    if (_isGpsOk) return 'Configuración correcta.';
-    return 'Falta seleccionar "Permitir todo el tiempo" en los ajustes de ubicación.';
+  Future<void> _reqOverlay() async {
+    final pkg = (await PackageInfo.fromPlatform()).packageName;
+    await AndroidIntent(
+      action: 'android.settings.action.MANAGE_OVERLAY_PERMISSION',
+      data: 'package:$pkg',
+    ).launch();
   }
 
   @override
   Widget build(BuildContext context) {
+    if (_isLoading) {
+      return const Scaffold(
+        backgroundColor: Colors.black,
+        body: Center(
+          child: CircularProgressIndicator(color: Colors.blueAccent),
+        ),
+      );
+    }
+
+    String buttonText;
+    VoidCallback onAction;
+    IconData stepIcon;
+    String stepTitle;
+    String stepDescription;
+    Color stepColor;
+
+    // Lógica secuencial del Asistente (Wizard)
+    if (!_isGpsOk) {
+      buttonText = '1. Activar Permisos de Ubicación';
+      onAction = _reqLocation;
+      stepIcon = Icons.location_on_rounded;
+      stepTitle = 'Ubicación Continua';
+      stepDescription =
+          'Para alertarte al llegar a tu destino, necesitamos acceder a tu ubicación incluso con la pantalla apagada.';
+      stepColor = Colors.blueAccent;
+    } else if (!_isBatteryOk) {
+      buttonText = '2. Desactivar Optimización de Batería';
+      onAction = _reqBattery;
+      stepIcon = Icons.battery_saver_rounded;
+      stepTitle = 'Batería sin Restricciones';
+      stepDescription =
+          'Android puede cerrar la alarma para ahorrar batería. Por favor, selecciona "Sin restricciones" en el siguiente menú.';
+      stepColor = Colors.orangeAccent;
+    } else if (!_isOverlayOk) {
+      buttonText = '3. Mostrar sobre otras Apps';
+      onAction = _reqOverlay;
+      stepIcon = Icons.layers_rounded;
+      stepTitle = 'Pantalla de Alarma';
+      stepDescription =
+          'Permite que la alerta de llegada despierte tu pantalla y aparezca por encima de otras aplicaciones.';
+      stepColor = Colors.purpleAccent;
+    } else {
+      buttonText = '¡Comenzar a usar alarMap!';
+      onAction = () {
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(builder: (context) => const MapScreen()),
+        );
+      };
+      stepIcon = Icons.check_circle_rounded;
+      stepTitle = '¡Todo Listo!';
+      stepDescription =
+          'El dispositivo está configurado perfectamente. ¡Ya puedes viajar sin pasarte de tu parada!';
+      stepColor = Colors.green;
+    }
+
     return Scaffold(
-      backgroundColor: const Color(0xFF0F172A),
-      body: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [const Color(0xFF0F172A), const Color(0xFF1E293B)],
-          ),
-        ),
-        child: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24.0),
-            child: Column(
-              children: [
-                const SizedBox(height: 30),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    const Text(
-                      'Configuración para\ntu Seguridad',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 26,
-                        fontWeight: FontWeight.bold,
-                        height: 1.2,
-                      ),
-                    ),
-                    IconButton(
-                      icon: const Icon(
-                        Icons.refresh_rounded,
-                        color: Colors.blueAccent,
-                      ),
-                      onPressed: _checkPermissions,
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 30),
-                Expanded(
-                  child: ListView(
-                    physics: const BouncingScrollPhysics(),
-                    children: [
-                      _buildSelectableItem(
-                        option: ConfigOption.location,
-                        icon: Icons.location_on_rounded,
-                        title: 'Ubicación en Todo Momento',
-                        description: _getLocationDescription(),
-                        isOk: _isGpsOk,
-                      ),
-                      const SizedBox(height: 16),
-                      _buildSelectableItem(
-                        option: ConfigOption.battery,
-                        icon: Icons.battery_saver_rounded,
-                        title: 'Sin Restricciones de Batería',
-                        description:
-                            'Evita que el sistema mate la alarma en viajes largos.',
-                        isOk: _isBatteryOk,
-                      ),
-                      const SizedBox(height: 16),
-                      _buildSelectableItem(
-                        option: ConfigOption.overlay,
-                        icon: Icons.layers_rounded,
-                        title: 'Mostrar sobre otras Apps',
-                        description:
-                            'Permite que el botón de apagado aparezca al llegar.',
-                        isOk: _isOverlayOk,
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 20),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton(
-                    onPressed: _handleMainAction,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.blueAccent,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 20),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(18),
-                      ),
-                      elevation: 10,
-                    ),
-                    child: const Text(
-                      'CONFIGURAR',
-                      style: TextStyle(
-                        fontWeight: FontWeight.w900,
-                        fontSize: 18,
-                        letterSpacing: 1.5,
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton(
-                    onPressed: () async {
-                      await FullScreenPermissionHelper.abrirConfiguracionPermiso();
-                    },
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.orangeAccent,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(18),
-                      ),
-                      elevation: 5,
-                    ),
-                    child: const Text(
-                      'PERMISO PANTALLA COMPLETA (Android 14+)',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 14,
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton(
-                    onPressed: _allDone
-                        ? () {
-                            Navigator.of(context).pushReplacement(
-                              MaterialPageRoute(
-                                builder: (context) => const MapScreen(),
-                              ),
-                            );
-                          }
-                        : null,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: _allDone
-                          ? Colors.blue
-                          : Colors.white.withOpacity(0.05),
-                      foregroundColor: Colors.white,
-                      disabledBackgroundColor: Colors.white.withOpacity(0.05),
-                      padding: const EdgeInsets.symmetric(vertical: 18),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(18),
-                      ),
-                      elevation: _allDone ? 8 : 0,
-                      shadowColor: Colors.blue.withOpacity(0.5),
-                    ),
-                    child: Text(
-                      'ENTRAR AL MAPA',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: _allDone ? Colors.white : Colors.white24,
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 30),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildSelectableItem({
-    required ConfigOption option,
-    required IconData icon,
-    required String title,
-    required String description,
-    required bool isOk,
-  }) {
-    final isSelected = _selectedOption == option;
-
-    return GestureDetector(
-      onTap: () => setState(() => _selectedOption = option),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 300),
-        padding: const EdgeInsets.all(20),
-        decoration: BoxDecoration(
-          color: isSelected
-              ? Colors.blueAccent.withOpacity(0.15)
-              : (isOk
-                    ? Colors.green.withOpacity(0.05)
-                    : Colors.white.withOpacity(0.05)),
-          borderRadius: BorderRadius.circular(24),
-          border: Border.all(
-            color: isOk
-                ? Colors.green.withOpacity(0.5)
-                : (isSelected
-                      ? Colors.blueAccent
-                      : Colors.white.withOpacity(0.1)),
-            width: isSelected ? 2.5 : 1.0,
-          ),
-          boxShadow: isSelected
-              ? [
-                  BoxShadow(
-                    color: Colors.blueAccent.withOpacity(0.2),
-                    blurRadius: 10,
-                  ),
-                ]
-              : [],
-        ),
-        child: Row(
-          children: [
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: isOk
-                    ? Colors.green.withOpacity(0.2)
-                    : (isSelected
-                          ? Colors.blueAccent.withOpacity(0.2)
-                          : Colors.white.withOpacity(0.05)),
-                shape: BoxShape.circle,
-              ),
-              child: Icon(
-                isOk ? Icons.check_circle_rounded : icon,
-                color: isOk
-                    ? Colors.greenAccent
-                    : (isSelected ? Colors.blueAccent : Colors.white70),
-                size: 26,
-              ),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+      backgroundColor: Colors.black,
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 40.0),
+          child: Column(
+            children: [
+              // Cabecera minimalista
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Text(
-                    title,
+                  const Text(
+                    'Asistente de Configuración',
                     style: TextStyle(
-                      color: isOk ? Colors.greenAccent : Colors.white,
+                      color: Colors.white54,
                       fontSize: 16,
                       fontWeight: FontWeight.bold,
                     ),
                   ),
-                  const SizedBox(height: 4),
-                  Text(
-                    description,
-                    style: TextStyle(
-                      color: Colors.white.withOpacity(0.5),
-                      fontSize: 11,
-                      height: 1.3,
+                  IconButton(
+                    icon: const Icon(
+                      Icons.refresh_rounded,
+                      color: Colors.white54,
                     ),
+                    onPressed: _checkPermissions,
+                    tooltip: 'Verificar permisos',
                   ),
                 ],
               ),
-            ),
-            if (isOk)
-              const Icon(
-                Icons.check_circle,
-                color: Colors.greenAccent,
-                size: 20,
-              )
-            else if (isSelected)
-              const Icon(
-                Icons.radio_button_checked,
-                color: Colors.blueAccent,
-                size: 20,
-              )
-            else
-              Icon(
-                Icons.radio_button_off,
-                color: Colors.white.withOpacity(0.2),
-                size: 20,
+
+              Expanded(
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 500),
+                  transitionBuilder:
+                      (Widget child, Animation<double> animation) {
+                        return FadeTransition(
+                          opacity: animation,
+                          child: SlideTransition(
+                            position: Tween<Offset>(
+                              begin: const Offset(0.0, 0.1),
+                              end: Offset.zero,
+                            ).animate(animation),
+                            child: child,
+                          ),
+                        );
+                      },
+                  child: Column(
+                    key: ValueKey<String>(stepTitle),
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(32),
+                        decoration: BoxDecoration(
+                          color: stepColor.withOpacity(0.1),
+                          shape: BoxShape.circle,
+                        ),
+                        child: Icon(stepIcon, size: 80, color: stepColor),
+                      ),
+                      const SizedBox(height: 40),
+                      Text(
+                        stepTitle,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 28,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        stepDescription,
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Colors.white.withOpacity(0.7),
+                          fontSize: 16,
+                          height: 1.4,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
-          ],
+
+              const SizedBox(height: 20),
+
+              // Botón de acción principal
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 300),
+                width: double.infinity,
+                height: 65,
+                child: ElevatedButton(
+                  onPressed: onAction,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: stepColor,
+                    foregroundColor: Colors.white,
+                    elevation: 10,
+                    shadowColor: stepColor.withOpacity(0.5),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                  ),
+                  child: Text(
+                    buttonText,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 0.5,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
